@@ -1,0 +1,8 @@
+*
+!pyproject.toml
+!grok_channel/
+!grok_channel/*.py
+!dashboard/
+!dashboard/index.html
+!dashboard/dashboard.css
+!dashboard/dashboard.mjs
