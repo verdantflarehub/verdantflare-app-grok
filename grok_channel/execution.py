@@ -3,6 +3,8 @@ import base64
 import io
 import json
 import os
+from contextlib import nullcontext
+from .proxy import ProxyUnavailable
 
 import httpx
 from PIL import Image, ImageOps
@@ -61,8 +63,9 @@ def payload(value):
 
 
 class Execution:
-    def __init__(self, calls, client):
+    def __init__(self, calls, client, *, transport=None):
         self.calls, self.client = calls, client
+        self.transport = transport
         self.models = set(os.environ.get('GROK_IMAGE_MODELS', 'grok-imagine-image-2.0').split(','))
         if not self.models or not self.models <= MODELS:
             raise ValueError('invalid_image_models')
@@ -80,8 +83,6 @@ class Execution:
             return self.calls.project(row)
         try:
             base = origin(row['api_url'])
-            if json.loads(row['proxy_json']) != {'mode': 'direct'}:
-                raise ValueError('proxy_unavailable')
             key = self.calls.credential(row)
         except (ValueError, Conflict):
             self.calls.rejected(row['id'])
@@ -96,27 +97,33 @@ class Execution:
             body['aspect_ratio'] = value['aspect_ratio']
             endpoint = '/images/generations'
         try:
-            with self.client.stream('POST', base + endpoint, headers={'Authorization': 'Bearer ' + key},
-                                    json=body, follow_redirects=False, timeout=300) as result:
-                if result.status_code in {400, 401, 403, 422}:
-                    self.calls.rejected(row['id'])
-                elif result.is_success:
-                    raw = bytearray()
-                    for part in result.iter_bytes():
-                        raw.extend(part)
-                        if len(raw) > MAX_BYTES * 4 // 3 + 1024 * 1024:
-                            raise ValueError('response_too_large')
-                    response = json.loads(raw)
-                    if not isinstance(response.get('data'), list) or len(response['data']) != 1:
-                        raise ValueError('invalid_response')
-                    encoded = response['data'][0]['b64_json']
-                    if not isinstance(encoded, str):
-                        raise ValueError('invalid_response')
-                    decoded = base64.b64decode(encoded, validate=True)
-                    with Image.open(io.BytesIO(decoded)) as im:
-                        mime = Image.MIME.get(im.format)
-                    output = image({'mime_type': mime, 'data': encoded})
-                    self.finish(row['id'], output)
+            if self.transport is None and json.loads(row['proxy_json']) != {'mode': 'direct'}:
+                raise ProxyUnavailable()
+            with self.transport(organization, json.loads(row['proxy_json'])) if self.transport else nullcontext(self.client) as client:
+                with client.stream('POST', base + endpoint, headers={'Authorization': 'Bearer ' + key},
+                                        json=body, follow_redirects=False, timeout=300) as result:
+                    if result.status_code in {400, 401, 403, 422}:
+                        self.calls.rejected(row['id'])
+                    elif result.is_success:
+                        raw = bytearray()
+                        for part in result.iter_bytes():
+                            raw.extend(part)
+                            if len(raw) > MAX_BYTES * 4 // 3 + 1024 * 1024:
+                                raise ValueError('response_too_large')
+                        response = json.loads(raw)
+                        if not isinstance(response.get('data'), list) or len(response['data']) != 1:
+                            raise ValueError('invalid_response')
+                        encoded = response['data'][0]['b64_json']
+                        if not isinstance(encoded, str):
+                            raise ValueError('invalid_response')
+                        decoded = base64.b64decode(encoded, validate=True)
+                        with Image.open(io.BytesIO(decoded)) as im:
+                            mime = Image.MIME.get(im.format)
+                        output = image({'mime_type': mime, 'data': encoded})
+                        self.finish(row['id'], output)
+        except ProxyUnavailable:
+            self.calls.rejected(row['id'])
+            raise Conflict('proxy_unavailable') from None
         except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError, OSError, Image.DecompressionBombError):
             # 429, 5xx, malformed/truncated output and lost responses are not evidence of non-acceptance.
             # In particular, no automatic re-POST is permitted after process restart.
