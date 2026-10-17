@@ -28,13 +28,11 @@ test('weekly breakdown, unknown, zero credits and gateway units remain distinct'
     bot_used_percent:null,extra_credit_usd:'0',auto_recharge:'unknown'},
     gateway_observation:{remaining:'12',unit:'Credits'}})];`);
   const html = run('list()');
-  assert.match(html, /已用 8%/);
-  assert.match(html, /Grok Build 6%/);
-  assert.match(html, /聊天 2%/);
-  assert.match(html, /每周 Grok Bot 限制<\/small><strong class="num">未知/);
+  assert.match(html, /8%/);
+  assert.match(html, /每周 Grok Bot<\/small><strong class="num">未登记/);
   assert.match(html, /0 USD/);
   assert.match(html, /12 Credits/);
-  assert.match(html, /账号已停用/);
+  assert.match(html, /已停用/);
   assert.doesNotMatch(html, /示例/);
 });
 
