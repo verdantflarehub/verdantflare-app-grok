@@ -115,11 +115,11 @@ class GrokAccountsTests(unittest.TestCase):
         reopened = Grok(Store(str(self.path), self.key), self.http)
         self.assertEqual(reopened.accounts.get('org', account['account_id']), changed)
 
-    def test_empty_logs_and_image_only_execution_capability(self):
+    def test_empty_logs_and_image_video_execution_capability(self):
         logs = self.client.post('/v1/calls/search', headers=self.headers, json={})
         self.assertEqual(logs.status_code, 200)
         self.assertEqual(logs.json()['items'], [])
-        self.assertEqual(self.client.get('/health').json()['execution_capabilities'], ['image'])
+        self.assertEqual(self.client.get('/health').json()['execution_capabilities'], ['image', 'video'])
 
     def test_weekly_breakdowns_are_not_added_or_inferred(self):
         account = self.create({'plus_used_percent': '8', 'build_used_percent': '6',

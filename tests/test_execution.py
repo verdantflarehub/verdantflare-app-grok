@@ -105,4 +105,35 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(self.api.get(path+'?url=bad',headers=self.headers).status_code,403)
         self.assertEqual(len(self.requests),1)
 
+    def test_video_submission_polling_and_encrypted_result(self):
+        video_headers = {**self.headers, 'X-Caller-Id': 'video-mcp'}
+        def video_upstream(request):
+            self.requests.append(request)
+            if request.method == 'POST' and request.url.path == '/v1/videos/generations':
+                return httpx.Response(200, json={'request_id': 'vid-req-1'})
+            if request.method == 'GET' and request.url.path == '/v1/videos/vid-req-1':
+                return httpx.Response(200, json={'status': 'done', 'progress': 100,
+                    'usage': {'cost_in_usd_ticks': 2500000000},
+                    'video': {'url': '/v1/videos/vid-req-1/content', 'respect_moderation': True}})
+            if request.method == 'GET' and request.url.path == '/v1/videos/vid-req-1/content':
+                return httpx.Response(200, content=b'\x00\x00\x00\x20ftypisom-video-data',
+                    headers={'content-type': 'video/mp4'})
+            return httpx.Response(404)
+        self.service.client = self.service.execution.client = httpx.Client(transport=httpx.MockTransport(video_upstream))
+        self.addCleanup(self.service.client.close)
+        submitted = self.api.post('/v1/calls', headers=video_headers, json={
+            'idempotency_key': 'vid-task', 'task_id': 'vid-task', 'model_id': 'grok-imagine-video',
+            'capability': 'video', 'payload': {'prompt': 'video test', 'duration': 5, 'resolution': '720p', 'aspect_ratio': '16:9'},
+            'budget_limit': '2'})
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        call = submitted.json()
+        self.assertEqual(call['state'], 'in_progress')
+        polled = self.api.get('/v1/calls/' + call['call_id'], headers=video_headers).json()
+        self.assertEqual(polled['state'], 'completed')
+        self.assertEqual(polled['settlement']['amount'], '0.25')
+        content = self.api.get('/v1/calls/' + call['call_id'] + '/result', headers=video_headers)
+        self.assertEqual(content.status_code, 200)
+        self.assertEqual(content.content, b'\x00\x00\x00\x20ftypisom-video-data')
+        self.assertEqual(self.api.get('/v1/calls/' + call['call_id'] + '/result', headers=self.headers).status_code, 403)
+
 if __name__ == '__main__': unittest.main()

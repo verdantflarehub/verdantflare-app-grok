@@ -55,6 +55,8 @@ class Calls:
                 db.execute('ALTER TABLE channel_calls ADD COLUMN api_url TEXT')
             if 'proxy_json' not in columns:
                 db.execute('ALTER TABLE channel_calls ADD COLUMN proxy_json TEXT')
+            if 'media' not in columns:
+                db.execute("ALTER TABLE channel_calls ADD COLUMN media TEXT NOT NULL DEFAULT 'image'")
 
     @staticmethod
     def project(row):
@@ -66,7 +68,7 @@ class Calls:
         return {'schema_version': 1, 'call_id': row['id'], 'task_id': row['task_id'],
                 'account_id': row['account_id'], 'model_id': row['model_id'],
                 'account_name': row.get('account_name'), 'account_status': row.get('account_status'),
-                'media': 'image', 'operation': row.get('action', 'generate'), 'duration_seconds': elapsed,
+                'media': row.get('media') or 'image', 'operation': row.get('action', 'generate'), 'duration_seconds': elapsed,
                 'duration_source': 'local_elapsed' if elapsed is not None else 'unknown',
                 'state': row['state'], 'accepted': None if row['accepted'] is None else bool(row['accepted']),
                 'revision': row['revision'], 'reason_code': None,
@@ -79,8 +81,10 @@ class Calls:
         with self.store.connect() as db:
             row = db.execute('SELECT * FROM channel_calls WHERE organization_id=? AND id=?',
                              (organization, call_id)).fetchone()
-        if row is None or (caller is not None and row['caller_id'] != caller):
+        if row is None:
             raise KeyError('call_not_found')
+        if caller is not None and row['caller_id'] != caller:
+            raise PermissionError('caller_mismatch')
         return dict(row)
 
     def by_operation(self, organization, caller, operation):
@@ -124,8 +128,9 @@ class Calls:
         if search:
             where.append('(instr(c.task_id,?)>0 OR instr(c.model_id,?)>0 OR instr(c.id,?)>0 OR instr(a.name,?)>0)')
             values.extend([search] * 4)
-        if media and media != 'image':
-            where.append('0=1')
+        if media:
+            where.append('c.media=?')
+            values.append(media)
         for bound, comparison in zip(bounds, ('>=', '<')):
             if bound:
                 where.append('c.created_at' + comparison + '?')
@@ -153,8 +158,8 @@ class Calls:
                 'summary': {'task_count': len(amounts), 'budget': total('budget_amount'),
                             'settlement': total('settlement_amount')}}
 
-    def reserve(self, organization, caller, operation, task, model, payload, account_id, ceiling, *, action="generate"):
-        if action not in {'generate', 'edit'}:
+    def reserve(self, organization, caller, operation, task, model, payload, account_id, ceiling, *, action="generate", media="image"):
+        if action not in {'generate', 'edit'} or media not in {'image', 'video'}:
             raise ValueError('invalid_operation')
         # A ceiling is a reservation, never a fabricated preflight estimate or settlement.
         if ceiling is None:
@@ -209,11 +214,11 @@ class Calls:
             call_id, timestamp = str(uuid.uuid4()), now()
             db.execute('''INSERT INTO channel_calls
                 (id,organization_id,caller_id,operation_id,digest,task_id,account_id,credential_version,
-                 quota_subject_id,model_id,state,reservation_amount,created_at,updated_at,api_url,proxy_json,action)
-                VALUES (?,?,?,?,?,?,?,?,?,?,'acceptance_unknown',?,?,?,?,?,?)''',
+                 quota_subject_id,model_id,state,reservation_amount,created_at,updated_at,api_url,proxy_json,action,media)
+                VALUES (?,?,?,?,?,?,?,?,?,?,'acceptance_unknown',?,?,?,?,?,?,?)''',
                 (call_id, organization, caller, operation, digest, task, account['id'],
                  account['credential_version'], account['quota_subject_id'], model, ceiling, timestamp, timestamp,
-                 account['api_url'], account['proxy_json'], action))
+                 account['api_url'], account['proxy_json'], action, media))
             return dict(db.execute('SELECT * FROM channel_calls WHERE id=?', (call_id,)).fetchone()), True
 
     def credential(self, row):
@@ -245,3 +250,20 @@ class Calls:
             db.execute("UPDATE channel_calls SET state=?,updated_at=?,finished_at=?,revision=revision+1 "
                        "WHERE id=? AND accepted=1 AND state NOT IN ('completed','failed') AND state!=?",
                        (state, timestamp, timestamp if state in {'completed', 'failed'} else None, call_id, state))
+
+    def complete_video(self, call_id, settlement=None):
+        timestamp = now()
+        with self.store.connect() as db:
+            if settlement is not None:
+                db.execute(
+                    "UPDATE channel_calls SET state='completed',accepted=1,settlement_amount=?,"
+                    "settlement_source='provider_reported',updated_at=?,finished_at=?,revision=revision+1 "
+                    "WHERE id=? AND state NOT IN ('completed','failed','rejected')",
+                    (amount(settlement), timestamp, timestamp, call_id),
+                )
+            else:
+                db.execute(
+                    "UPDATE channel_calls SET state='completed',accepted=1,updated_at=?,finished_at=?,"
+                    "revision=revision+1 WHERE id=? AND state NOT IN ('completed','failed','rejected')",
+                    (timestamp, timestamp, call_id),
+                )
