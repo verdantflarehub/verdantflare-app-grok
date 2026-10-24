@@ -113,7 +113,14 @@ class Execution:
         self.models = set(os.environ.get('GROK_IMAGE_MODELS', 'grok-imagine-image-2.0').split(','))
         if not self.models or not self.models <= MODELS:
             raise ValueError('invalid_image_models')
-        self.video_models = VIDEO_MODELS
+        self.video_models = {
+            m.strip() for m in os.environ.get(
+                'GROK_VIDEO_MODELS',
+                'grok-imagine-video,grok-imagine-video-1.5,grok-imagine-video-1.5-lite,grok_video_v15_lite'
+            ).split(',') if m.strip()
+        }
+        if not self.video_models or not self.video_models <= VIDEO_MODELS:
+            raise ValueError('invalid_video_models')
         self.video_dir = Path(calls.store.path).parent / 'video_results'
         self.video_dir.mkdir(parents=True, exist_ok=True)
         with calls.store.connect() as db:
