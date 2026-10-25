@@ -3,6 +3,7 @@ import base64
 import io
 import json
 import os
+import re
 from contextlib import nullcontext
 from decimal import Decimal
 from pathlib import Path
@@ -17,10 +18,37 @@ from .store import Conflict, now
 
 MODELS = {'grok-imagine-image', 'grok-imagine-image-2.0', 'grok-imagine-image-quality'}
 VIDEO_MODELS = {'grok-imagine-video', 'grok-imagine-video-1.5', 'grok-imagine-video-1.5-lite', 'grok_video_v15_lite'}
-ASPECTS = {'16:9', '9:16', '1:1', '4:3', '3:4'}
+ASPECTS = {'16:9', '9:16', '1:1', '4:3', '3:4', '2:3', '3:2'}
 VIDEO_ASPECTS = {'16:9', '9:16', '1:1', '4:3', '3:4', '3:2', '2:3'}
 MAX_BYTES = 32 * 1024 * 1024
 MAX_VIDEO_BYTES = 256 * 1024 * 1024
+
+
+REASON = re.compile(r'[A-Za-z0-9_.:-]{1,64}')
+
+
+def safe_reason(value, fallback):
+    """Persist short machine codes only; free-form upstream or exception text never reaches callers."""
+    return value if isinstance(value, str) and REASON.fullmatch(value) else fallback
+
+
+def rejection_reason(result):
+    reason = f'provider_http_{result.status_code}'
+    try:
+        raw = result.read()
+        data = json.loads(raw) if len(raw) <= 64 * 1024 else None
+    except (httpx.HTTPError, ValueError):
+        data = None
+    if not isinstance(data, dict):
+        return reason
+    error = data.get('error')
+    code = data.get('code') or (error.get('code') if isinstance(error, dict) else None)
+    if isinstance(code, str) and REASON.fullmatch(code):
+        return f'{reason}:{code}'
+    text = ' '.join(str(item) for item in (data.get('error'), data.get('message')) if item).lower()
+    if 'moderat' in text or 'safety' in text or 'content policy' in text:
+        return f'{reason}:content_moderation'
+    return reason
 
 
 def image(value, *, source=False):
@@ -140,8 +168,8 @@ class Execution:
         try:
             base = origin(row['api_url'])
             key = self.calls.credential(row)
-        except (ValueError, Conflict):
-            self.calls.rejected(row['id'])
+        except (ValueError, Conflict) as exc:
+            self.calls.rejected(row['id'], reason=safe_reason(getattr(exc, 'code', None) or str(exc), 'credential_error'))
             raise
         body = {key: value[key] for key in ('prompt', 'resolution')}
         body.update(model=model, n=1, response_format='b64_json')
@@ -159,7 +187,7 @@ class Execution:
                 with client.stream('POST', base + endpoint, headers={'Authorization': 'Bearer ' + key},
                                         json=body, follow_redirects=False, timeout=300) as result:
                     if result.status_code in {400, 401, 403, 422}:
-                        self.calls.rejected(row['id'])
+                        self.calls.rejected(row['id'], reason=rejection_reason(result))
                     elif result.is_success:
                         raw = bytearray()
                         for part in result.iter_bytes():
@@ -182,7 +210,7 @@ class Execution:
                         output = image({'mime_type': mime, 'data': encoded})
                         self.finish(row['id'], output)
         except ProxyUnavailable:
-            self.calls.rejected(row['id'])
+            self.calls.rejected(row['id'], reason='proxy_unavailable')
             raise Conflict('proxy_unavailable') from None
         except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError, OSError, Image.DecompressionBombError):
             # 429, 5xx, malformed/truncated output and lost responses are not evidence of non-acceptance.
@@ -201,8 +229,8 @@ class Execution:
         try:
             base = origin(row['api_url'])
             key = self.calls.credential(row)
-        except (ValueError, Conflict):
-            self.calls.rejected(row['id'])
+        except (ValueError, Conflict) as exc:
+            self.calls.rejected(row['id'], reason=safe_reason(getattr(exc, 'code', None) or str(exc), 'credential_error'))
             raise
         upstream_model = 'grok-imagine-video' if model == 'grok_video_v15_lite' else model
         body = {
@@ -227,7 +255,7 @@ class Execution:
                 with client.stream('POST', base + '/videos/generations', headers={'Authorization': 'Bearer ' + key},
                                    json=body, follow_redirects=False, timeout=120) as result:
                     if result.status_code in {400, 401, 403, 422}:
-                        self.calls.rejected(row['id'])
+                        self.calls.rejected(row['id'], reason=rejection_reason(result))
                     elif result.is_success:
                         raw = bytearray()
                         for part in result.iter_bytes():
@@ -241,7 +269,7 @@ class Execution:
                         self.calls.accepted(row['id'], request_id.strip())
                         self.calls.observed(row['id'], 'in_progress')
         except ProxyUnavailable:
-            self.calls.rejected(row['id'])
+            self.calls.rejected(row['id'], reason='proxy_unavailable')
             raise Conflict('proxy_unavailable') from None
         except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError, OSError):
             pass

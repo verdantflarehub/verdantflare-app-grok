@@ -32,6 +32,9 @@ class ExecutionTests(unittest.TestCase):
             self.requests.append(request)
             if self.mode == 'timeout': raise httpx.ReadTimeout('synthetic interruption', request=request)
             if self.mode == 'reject': return httpx.Response(400)
+            if self.mode == 'moderated': return httpx.Response(400, json={'error': 'Generated image rejected by content moderation.'})
+            if self.mode == 'coded': return httpx.Response(422, json={'code': 'invalid_argument', 'error': 'prompt text echoed here'})
+            if self.mode == 'freetext': return httpx.Response(403, json={'error': 'Your team has no credits: prompt text echoed here'})
             if self.mode == 'limited': return httpx.Response(429)
             if self.mode == 'bad': return httpx.Response(200, json={'data':[{'b64_json':base64.b64encode(b'not an image').decode()}]})
             return httpx.Response(200, json={'data':[{'b64_json':IMAGE}]})
@@ -84,15 +87,32 @@ class ExecutionTests(unittest.TestCase):
     def test_rejection_does_not_resubmit_or_charge_reservation(self):
         self.mode='reject'; result=self.submit().json()
         self.assertEqual(result['state'],'rejected'); self.assertFalse(result['accepted'])
+        self.assertEqual(result['reason_code'],'provider_http_400')
         self.assertEqual(self.submit().json(),result); self.assertEqual(len(self.requests),1)
         row=self.service.calls.get('org',result['call_id'])
         self.assertEqual(row['reservation_amount'],'0')
+
+    def test_rejection_reason_keeps_only_short_codes(self):
+        for mode, expected in (('moderated', 'provider_http_400:content_moderation'),
+                               ('coded', 'provider_http_422:invalid_argument'),
+                               ('freetext', 'provider_http_403')):
+            self.mode = mode
+            result = self.submit(f'task_{mode}').json()
+            self.assertEqual(result['state'], 'rejected')
+            self.assertEqual(result['reason_code'], expected)
+            self.assertNotIn('prompt', result['reason_code'])
+
+    def test_portrait_and_landscape_aspect_ratios_allowed(self):
+        for ratio in ('2:3', '3:2'):
+            res = self.submit(f'task_{ratio}', payload={'prompt':'portrait test','aspect_ratio':ratio})
+            self.assertEqual(res.status_code, 200, res.text)
+            self.assertEqual(res.json()['state'], 'completed')
 
     def test_invalid_parameters_never_reach_upstream(self):
         for change in ({'model_id':'unapproved'}, {'budget_limit':None}, {'capability':'video'},
             {'payload':{'prompt':'test','image':{'url':'https://unapproved.invalid/a.png'}}},
             {'payload':{'prompt':'test','action':'edit','image':{'mime_type':'image/jpeg','data':IMAGE}}},
-            {'payload':{'prompt':'test','aspect_ratio':'3:2'}}):
+            {'payload':{'prompt':'test','aspect_ratio':'21:9'}}):
             self.assertIn(self.submit(**change).status_code,{400,409})
         self.assertEqual(self.requests,[])
 
