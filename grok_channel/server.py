@@ -298,6 +298,25 @@ def create_execution(service, token):
             if not IDENTITY.fullmatch(org) or caller not in {'image-mcp', 'video-mcp'}:
                 raise APIError('forbidden', 403)
             if request.method == 'POST':
+                if request.url.path == '/v1/video-preflight':
+                    if caller != 'video-mcp':
+                        raise APIError('forbidden', 403)
+                    value = await body(request)
+                    if set(value) - {'model_id', 'account_id'}:
+                        raise ValueError('invalid_request')
+                    model = value.get('model_id')
+                    if not isinstance(model, str) or model not in service.execution.video_models:
+                        raise APIError('capability_not_supported')
+                    account = value.get('account_id')
+                    if account is not None:
+                        account = str(uuid.UUID(account))
+                    result = await run_in_threadpool(service.calls.video_preflight, org, account)
+                    if not service.accepting:
+                        result.update(can_submit=False, reason_code='channel_unavailable',
+                                      message='The channel is not accepting new calls.')
+                    return response({**result, 'model_id': model,
+                        'status': ('unknown' if result['video_quota']['status'] == 'unknown' else 'ready')
+                                  if result['can_submit'] else 'blocked'})
                 if not service.accepting:
                     return response({'error': 'channel_unavailable', 'schema_version': 1,
                                      'accepted': False, 'state': 'rejected'}, 503)
@@ -336,7 +355,8 @@ def create_execution(service, token):
             return response({'error': 'call_not_found'}, 404)
         except (ValueError, TypeError, AttributeError):
             return response({'error': 'invalid_request'}, 400)
-    return Starlette(routes=[Route('/v1/calls', execute, methods=['POST']),
+    return Starlette(routes=[Route('/v1/video-preflight', execute, methods=['POST']),
+        Route('/v1/calls', execute, methods=['POST']),
         Route('/v1/calls/by-idempotency/{operation_id}', execute),
         Route('/v1/calls/{call_id:uuid}', execute), Route('/v1/calls/{call_id:uuid}/result', execute)])
 

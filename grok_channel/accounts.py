@@ -8,6 +8,7 @@ import uuid
 
 from .store import Conflict, now
 from . import profile
+from . import video_quota
 from .proxy import proxy_reference
 
 
@@ -50,14 +51,19 @@ class Accounts:
 
     registration = staticmethod(profile.registration)
 
-    @staticmethod
-    def project(row):
+    def project(self, row):
+        registration = json.loads(row['registration_json'])
+        with self.store.connect() as db:
+            quota = video_quota.project(db, row, registration)
+        observation = json.loads(row['gateway_observation_json']) if row['gateway_observation_json'] else None
         return {'schema_version': 1, 'account_id': row['id'], 'name': row['name'],
                 'api_url': row['api_url'], 'proxy': json.loads(row['proxy_json']),
                 'status': row['status'], 'default': bool(row['is_default']),
                 'quota_subject_id': row['quota_subject_id'],
-                'registration': json.loads(row['registration_json']),
-                'gateway_observation': json.loads(row['gateway_observation_json']) if row['gateway_observation_json'] else None,
+                'registration': registration, 'video_quota': quota,
+                'gateway_observation': observation,
+                'gateway_observation_status': ('unavailable' if row['authorization_state'] != 'active' else
+                    'historical' if observation else 'unknown'),
                 'revision': row['revision'], 'authorization_state': row['authorization_state'],
                 'created_at': row['created_at'], 'updated_at': row['updated_at']}
 

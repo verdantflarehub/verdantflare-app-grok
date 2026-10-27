@@ -9,6 +9,7 @@ from datetime import datetime, UTC
 
 from .accounts import Accounts
 from .store import Conflict, now
+from . import video_quota
 
 
 def amount(value):
@@ -196,14 +197,10 @@ class Calls:
                                (organization, account['quota_subject_id'])).fetchall()
             limits = [Decimal(data['budget_limit']) for peer in peers
                       if (data := json.loads(peer['registration_json'])).get('budget_limit') is not None]
-            daily_limits = [data['daily_limit'] for peer in peers
-                            if (data := json.loads(peer['registration_json'])).get('daily_limit') is not None]
-            if daily_limits:
-                count = db.execute('SELECT COUNT(*) FROM channel_calls WHERE organization_id=? AND '
-                                   'quota_subject_id=? AND created_at>=?',
-                                   (organization, account['quota_subject_id'], datetime.now(UTC).date().isoformat())).fetchone()[0]
-                if count >= min(daily_limits):
-                    raise Conflict('daily_limit_reached')
+            if media == 'video':
+                quota = video_quota.project(db, account, json.loads(account['registration_json']))
+                if quota['reason_code']:
+                    raise Conflict(quota['reason_code'])
             charges = db.execute('SELECT reservation_amount,settlement_amount,reservation_unknown FROM channel_calls '
                                  'WHERE organization_id=? AND quota_subject_id=?',
                                  (organization, account['quota_subject_id'])).fetchall()
@@ -222,6 +219,21 @@ class Calls:
                  account['credential_version'], account['quota_subject_id'], model, ceiling, timestamp, timestamp,
                  account['api_url'], account['proxy_json'], action, media))
             return dict(db.execute('SELECT * FROM channel_calls WHERE id=?', (call_id,)).fetchone()), True
+
+    def video_preflight(self, organization, account_id=None):
+        with self.store.connect() as db:
+            db.execute('BEGIN')
+            account = (Accounts.row(db, organization, account_id) if account_id else
+                       db.execute('SELECT * FROM channel_accounts WHERE organization_id=? AND is_default=1',
+                                  (organization,)).fetchone())
+            if account is None:
+                raise Conflict('account_required')
+            quota = video_quota.project(db, account, json.loads(account['registration_json']))
+            reason = ('account_disabled' if account['status'] != 'active' else
+                      'authorization_not_verified' if account['authorization_state'] != 'active' else
+                      quota['reason_code'])
+            return {'schema_version': 1, 'channel_id': 'grok', 'can_submit': reason is None,
+                    'reason_code': reason, 'message': video_quota.REASONS.get(reason), 'video_quota': quota}
 
     def credential(self, row):
         # Recovery uses the pinned version even after account rotation, disabling or archival.

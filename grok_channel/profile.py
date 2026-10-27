@@ -5,6 +5,7 @@ import os
 from urllib.parse import urlsplit
 
 from .store import now
+from .video_quota import validate as video_limits
 
 DEFAULT_ORIGIN = ''
 
@@ -46,9 +47,11 @@ def registration(value):
     percentages = ('plus_used_percent', 'build_used_percent', 'chat_used_percent', 'bot_used_percent')
     times = ('plus_reset_at', 'plus_observed_at', 'bot_reset_at', 'bot_observed_at', 'observed_at')
     if not isinstance(value, dict) or set(value) - set(percentages + times + (
-            'membership_tier', 'membership_expiry', 'extra_credit_usd', 'auto_recharge', 'note', 'budget_limit')):
+            'membership_tier', 'membership_expiry', 'extra_credit_usd', 'auto_recharge', 'note', 'budget_limit', 'video_limits')):
         raise ValueError('invalid_registration')
     result = dict(value)
+    if 'video_limits' in result:
+        result['video_limits'] = video_limits(result['video_limits'])
     for field in ('membership_tier', 'note'):
         if field in result and (not isinstance(result[field], str) or len(result[field]) > 2000):
             raise ValueError('invalid_registration')
