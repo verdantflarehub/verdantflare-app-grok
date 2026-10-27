@@ -15,10 +15,17 @@ def configured_publisher(env, store, version):
     if not endpoint or not scope:
         raise ValueError('incomplete_discovery_configuration')
     config = Config(endpoint, scope, env.get('ETCD_USERNAME', ''), env.get('ETCD_PASSWORD', ''))
+    from types import SimpleNamespace
+    from .capabilities import load_metadata, project
+    metadata = load_metadata(env.get('CHANNEL_METADATA_FILE', ''))
+    execution = SimpleNamespace(models=set(env.get('GROK_IMAGE_MODELS', 'grok-imagine-image-2.0').split(',')),
+        video_models=set(env.get('GROK_VIDEO_MODELS', 'grok-imagine-video,grok-imagine-video-1.5,grok-imagine-video-1.5-lite,grok_video_v15_lite').split(',')))
+    capabilities = [*project(metadata, 'image-mcp', execution)['capabilities'],
+                    *project(metadata, 'video-mcp', execution)['capabilities']]
     return Publisher(config, store, version, [{
-        'capability_id': capability, 'adapter_version': '1',
-        'execution_state': 'enabled'}
-        for capability in ('image.generate', 'image.edit', 'video.generate')])
+        'capability_id': capability['capability_id'], 'adapter_version': '1',
+        'execution_state': capability['execution_state']}
+        for capability in capabilities])
 
 
 class PublicationLifetime:

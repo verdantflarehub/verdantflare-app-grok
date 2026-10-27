@@ -286,15 +286,24 @@ def create_app(service=None, token=None):
 
 
 def create_execution(service, token):
+    from .capabilities import load_metadata, project
+    metadata = load_metadata()
+
     async def execute(request):
         try:
             authorization = request.headers.getlist('authorization')
             if len(token) < 32 or len(authorization) != 1 or not hmac.compare_digest(authorization[0], 'Bearer ' + token):
                 raise APIError('unauthorized', 401)
-            if request.url.query or len(request.headers.getlist('x-organization-id')) != 1 or len(request.headers.getlist('x-caller-id')) != 1:
+            if request.url.query or len(request.headers.getlist('x-caller-id')) != 1:
                 raise APIError('invalid_identity', 403)
             org = request.headers.get('x-organization-id', '')
             caller = request.headers.get('x-caller-id', '')
+            if caller not in {'image-mcp', 'video-mcp'}:
+                raise APIError('forbidden', 403)
+            if request.url.path == '/v1/capabilities':
+                return response(project(metadata, caller, service.execution))
+            if len(request.headers.getlist('x-organization-id')) != 1:
+                raise APIError('invalid_identity', 403)
             if not IDENTITY.fullmatch(org) or caller not in {'image-mcp', 'video-mcp'}:
                 raise APIError('forbidden', 403)
             if request.method == 'POST':
@@ -355,7 +364,7 @@ def create_execution(service, token):
             return response({'error': 'call_not_found'}, 404)
         except (ValueError, TypeError, AttributeError):
             return response({'error': 'invalid_request'}, 400)
-    return Starlette(routes=[Route('/v1/video-preflight', execute, methods=['POST']),
+    return Starlette(routes=[Route('/v1/capabilities', execute), Route('/v1/video-preflight', execute, methods=['POST']),
         Route('/v1/calls', execute, methods=['POST']),
         Route('/v1/calls/by-idempotency/{operation_id}', execute),
         Route('/v1/calls/{call_id:uuid}', execute), Route('/v1/calls/{call_id:uuid}/result', execute)])
