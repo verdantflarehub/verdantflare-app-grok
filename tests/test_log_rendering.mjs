@@ -24,3 +24,15 @@ test('logs distinguish unfinished fees, unknown final fees and confirmed zero', 
   assert.match(html, /<td class="num">5 USD<\/td>/);
   assert.match(html, /<td class="num">6 USD<\/td>/);
 });
+
+test('caller ceilings and remaining reservations never masquerade as estimates or settlement', () => {
+  const context=vm.createContext({window:{},document:{querySelector:()=>({})},AbortController});
+  vm.runInContext(readFileSync(new URL('../dashboard/dashboard.mjs',import.meta.url),'utf8'),context);
+  const run=code=>vm.runInContext(code,context);
+  run(`logs={accounts:[],summary:{task_count:1,budget:{amount:null,unit:'USD',unknown_count:1},budget_limit:{amount:'2',unit:'USD',unknown_count:0},reservation:{amount:'0',unit:'USD',unknown_count:0},settlement:{amount:null,unit:'USD',unknown_count:1}},items:[{created_at:'2026-10-28T00:00:00Z',task_id:'task',model_id:'model',state:'rejected',budget:{amount:null,unit:'USD'},budget_limit:{amount:'2',unit:'USD'},reservation:{amount:'0',unit:'USD'},settlement:{amount:null,unit:'USD'}}]}`);
+  const html=run('logView()');
+  assert.match(html, /预估：<b>未知<\/b>/);
+  assert.match(html, /上限 2 USD/);
+  assert.match(html, /本地预留 0 USD/);
+  assert.match(html, /<td class="num">未知<\/td>/);
+});

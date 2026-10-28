@@ -60,6 +60,8 @@ class Calls:
                 db.execute("ALTER TABLE channel_calls ADD COLUMN media TEXT NOT NULL DEFAULT 'image'")
             if 'reason_code' not in columns:
                 db.execute("ALTER TABLE channel_calls ADD COLUMN reason_code TEXT")
+            if 'budget_limit_amount' not in columns:
+                db.execute("ALTER TABLE channel_calls ADD COLUMN budget_limit_amount TEXT")
 
     @staticmethod
     def project(row):
@@ -76,6 +78,10 @@ class Calls:
                 'state': row['state'], 'accepted': None if row['accepted'] is None else bool(row['accepted']),
                 'revision': row['revision'], 'reason_code': row.get('reason_code'),
                 'budget': {'amount': row['budget_amount'], 'unit': 'USD', 'source': 'unknown'},
+                'budget_limit': {'amount': row.get('budget_limit_amount'), 'unit': 'USD',
+                                 'source': 'caller_limit' if row.get('budget_limit_amount') is not None else 'unknown'},
+                'reservation': {'amount': row['reservation_amount'] if row['settlement_amount'] is None else '0',
+                                'unit': 'USD', 'source': 'local_ledger'},
                 'settlement': {'amount': row['settlement_amount'], 'unit': 'USD',
                                'source': row['settlement_source']},
                 'created_at': row['created_at'], 'updated_at': row['updated_at']}
@@ -143,7 +149,9 @@ class Calls:
         with self.store.connect() as db:
             # Both the page and full-filter summary come from the same read snapshot.
             db.execute('BEGIN')
-            amounts = db.execute('SELECT budget_amount,settlement_amount' + query, values).fetchall()
+            amounts = db.execute("SELECT budget_amount,budget_limit_amount,settlement_amount,"
+                                 "CASE WHEN settlement_amount IS NULL THEN reservation_amount ELSE '0' END AS current_reservation_amount"
+                                 + query, values).fetchall()
             rows = db.execute('SELECT c.*,a.name AS account_name,a.status AS account_status' + query +
                               ' ORDER BY c.created_at DESC,c.id LIMIT ? OFFSET ?',
                               [*values, limit, offset]).fetchall()
@@ -159,6 +167,7 @@ class Calls:
         return {'schema_version': 1, 'items': [self.project(row) for row in rows], 'total': len(amounts),
                 'accounts': [dict(row) for row in account_options],
                 'summary': {'task_count': len(amounts), 'budget': total('budget_amount'),
+                            'budget_limit': total('budget_limit_amount'), 'reservation': total('current_reservation_amount'),
                             'settlement': total('settlement_amount')}}
 
     def reserve(self, organization, caller, operation, task, model, payload, account_id, ceiling, *, action="generate", media="image"):
@@ -213,10 +222,10 @@ class Calls:
             call_id, timestamp = str(uuid.uuid4()), now()
             db.execute('''INSERT INTO channel_calls
                 (id,organization_id,caller_id,operation_id,digest,task_id,account_id,credential_version,
-                 quota_subject_id,model_id,state,reservation_amount,created_at,updated_at,api_url,proxy_json,action,media)
-                VALUES (?,?,?,?,?,?,?,?,?,?,'acceptance_unknown',?,?,?,?,?,?,?)''',
+                 quota_subject_id,model_id,state,budget_limit_amount,reservation_amount,created_at,updated_at,api_url,proxy_json,action,media)
+                VALUES (?,?,?,?,?,?,?,?,?,?,'acceptance_unknown',?,?,?,?,?,?,?,?)''',
                 (call_id, organization, caller, operation, digest, task, account['id'],
-                 account['credential_version'], account['quota_subject_id'], model, ceiling, timestamp, timestamp,
+                 account['credential_version'], account['quota_subject_id'], model, ceiling, ceiling, timestamp, timestamp,
                  account['api_url'], account['proxy_json'], action, media))
             return dict(db.execute('SELECT * FROM channel_calls WHERE id=?', (call_id,)).fetchone()), True
 
